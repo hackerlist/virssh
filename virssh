@@ -1,0 +1,80 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+    virssh
+    ~~~~~~
+    virsh auto-connector and ip-resolver
+
+"""
+
+import os
+import sys
+import time
+import argparse
+import subprocess
+import libvirt
+from lxml import etree
+
+def resolve_mac(vm):
+    """Retrieves MAC address from a libvirt vm"""
+    desc = etree.fromstring(vm.XMLDesc(0))
+    return (desc.find("devices/interface[@type='network']/mac")
+            .attrib["address"].lower().strip())
+
+def resolve_ip(mac, vm):
+    """Resolves ip of a mac address using arp"""
+    arp_proc = subprocess.Popen(["sudo", "arp", "-n"], stdout=subprocess.PIPE)
+    arp_stdout, arp_stderr = arp_proc.communicate()
+    try:
+        return next(e for e in arp_stdout.splitlines()[1:]\
+                        if '52:54:00:2c:4a:be' in e).split()[0]
+    except StopIteration:
+        print("Aborting. The VM is still booting ...")
+        raise
+    
+def fork_ssh(user, ip):
+    """Uses paramiko to establish an ssh connection"""    
+    return os.execlp('ssh', 'ssh -A', '%s@%s' % (user, ip))
+
+def virsh(domain, system='qemu:///system'):
+    """Establishes a connection to a vm via virsh.
+
+    If vm has off status and is not in the running pool, create it.
+    """
+    conn = libvirt.open(system)
+    if not conn:
+        sys.stderr.write('Failed to open connection to the hypervisor\n')
+        raise
+
+    try:
+        domain = conn.lookupByName(domain)
+        if not domain.isActive():
+            domain.create()
+            print("Spinning up VM ...")
+            time.sleep(15)
+
+        return domain
+    except libvirt.libvirtError as e:
+        raise e
+
+def argparser():
+    parser = argparse.ArgumentParser(
+        description='Get IP address of a virtual machine')
+    parser.add_argument('--system', default='qemu:///system',
+                        help='Use qemu:///system')
+    parser.add_argument('vm_name', help='Name of the virtual machine')
+    parser.add_argument('--username', help='Name of the virtual machine')
+    return parser
+
+if __name__ == "__main__":
+    args = argparser().parse_args()
+    vm = virsh(args.vm_name, system=args.system)
+    mac = resolve_mac(vm)
+    ip = resolve_ip(mac, vm)
+
+    if args.username:
+        fork_ssh(args.username,  ip)
+    else:
+        print(mac, ip)
+
